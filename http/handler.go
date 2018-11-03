@@ -60,10 +60,10 @@ func (g *GameHandler) AddGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hub := hub{
-		players:     make(map[string]*listener),
-		moveC:       make(chan ReadMessage),
-		registerC:   make(chan *listener),
-		unregisterC: make(chan *listener),
+		move:       make(chan ReadMessage),
+		register:   make(chan *listener),
+		unregister: make(chan *listener),
+		ready:      make(chan *listener),
 	}
 
 	g.RLock()
@@ -106,7 +106,7 @@ func (g *GameHandler) JoinGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hub.registerC <- &listener{
+	hub.register <- &listener{
 		conn: conn,
 		hub:  hub,
 		id:   id,

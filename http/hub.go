@@ -1,8 +1,6 @@
 package http
 
 import (
-	"errors"
-	"fmt"
 	"log"
 	"rockpaperscissor/rockpaperscissor"
 	"time"
@@ -11,71 +9,74 @@ import (
 )
 
 type hub struct {
-	players map[string]*listener
-	history []rockpaperscissor.Result
+	listeners []*listener
 
-	moveC       chan ReadMessage
-	resultsC    chan rockpaperscissor.Result
-	registerC   chan *listener
-	unregisterC chan *listener
+	move       chan ReadMessage
+	register   chan *listener
+	unregister chan *listener
+	ready      chan *listener
 }
 
 type listener struct {
-	id   string
-	hub  *hub
-	conn *websocket.Conn
-	move rockpaperscissor.Move
+	id    string
+	ready bool
+	move  rockpaperscissor.Move
+	hub   *hub
+	conn  *websocket.Conn
+
+	outcome chan rockpaperscissor.Outcome
 }
 
-func (c *listener) Move() rockpaperscissor.Move { return c.move }
-func (c *listener) Name() string                { return c.id }
-func (c *listener) ResetMove()                  { c.move = 0 }
+func (c *listener) ID() string                          { return c.id }
+func (c *listener) Move() rockpaperscissor.Move         { return c.move }
+func (c *listener) Decide(out rockpaperscissor.Outcome) { c.outcome <- out }
 
 func (h *hub) run() {
-
 	for {
 		select {
-		case c := <-h.registerC:
-			h.players[c.id] = c
+		case c := <-h.register:
+			h.listeners = append(h.listeners, c)
 			go c.read()
 			go c.write()
-		case c := <-h.unregisterC:
-			delete(h.players, c.id)
-		case msg := <-h.moveC:
-			c := h.players[msg.ID]
-			c.move = msg.Move
-			if ok := h.isPlayersReady(); !ok {
+		// case c := <-h.unregister:
+		// delete(h.players, c.id)
+		case msg := <-h.move:
+			var l *listener
+			for _, lsn := range h.listeners {
+				if lsn.ID() == msg.ID {
+					l = lsn
+				}
+			}
+			l.move = msg.Move
+			l.ready = true
+
+			h.ready <- l
+		case <-h.ready:
+			if ready := h.isPartyReady(); !ready {
+				// if the players isn't ready then do nothing.
 				continue
 			}
-
-			opponent, err := h.getOpponent(c.Name())
-			if err != nil {
-				log.Println(err)
-			}
-
-			res := rockpaperscissor.Play(c, opponent)
-			h.history = append(h.history, res)
-			h.resultsC <- res
+			first := h.listeners[0]
+			second := h.listeners[1]
+			rockpaperscissor.Play(first, second)
+			first.ready = false
+			second.ready = false
 		}
 	}
 }
 
-func (h *hub) isPlayersReady() bool {
-	for _, p := range h.players {
-		if p.move == 0 {
+func (h *hub) isPartyReady() bool {
+	if len(h.listeners) < 2 {
+		// this is not a party?
+		return false
+	}
+
+	for _, l := range h.listeners {
+		if !l.ready {
 			return false
 		}
 	}
 	return true
-}
-
-func (h *hub) getOpponent(id string) (*listener, error) {
-	for _, p := range h.players {
-		if p.Name() != id {
-			return p, nil
-		}
-	}
-	return nil, errors.New("couldn't find any opponents in the map")
 }
 
 // ReadMessage is the message the peers will send us.
@@ -86,7 +87,7 @@ type ReadMessage struct {
 
 func (c *listener) read() {
 	defer func() {
-		c.hub.unregisterC <- c
+		c.hub.unregister <- c
 		c.conn.Close()
 	}()
 	c.conn.SetReadLimit(512)
@@ -104,8 +105,12 @@ func (c *listener) read() {
 			break
 		}
 
-		c.hub.moveC <- req
+		c.hub.move <- req
 	}
+}
+
+type ResultResponse struct {
+	Outcome rockpaperscissor.Outcome `json:"outcome"`
 }
 
 func (c *listener) write() {
@@ -117,8 +122,13 @@ func (c *listener) write() {
 
 	for {
 		select {
-		case res := <-c.hub.resultsC:
-			fmt.Println(res.Winner.Name())
+		case o := <-c.outcome:
+			res := ResultResponse{Outcome: o}
+			if err := c.conn.WriteJSON(&res); err != nil {
+				log.Printf("Error, can't seem to write the message: %v", err)
+				break
+			}
+
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {

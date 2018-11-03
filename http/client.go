@@ -50,12 +50,14 @@ func (c *Client) Open(game string) error {
 	c.wsConn = conn
 
 	for {
-		_, p, err := conn.ReadMessage()
+		var res ResultResponse
+		err := conn.ReadJSON(&res)
 		if err != nil {
 			log.Println("read:", err)
 			break
 		}
-		fmt.Println(string(p))
+
+		// fmt.Println(res.Result.Winner.Name())
 	}
 	return nil
 }
