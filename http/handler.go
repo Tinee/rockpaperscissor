@@ -18,7 +18,7 @@ type GameHandler struct {
 	websocket.Upgrader
 }
 
-// NewGameHandler sets up
+// NewGameHandler sets up a Http.Handler
 func NewGameHandler() *GameHandler {
 	mux := mux.NewRouter()
 	gh := &GameHandler{
@@ -27,35 +27,32 @@ func NewGameHandler() *GameHandler {
 		Upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
+			CheckOrigin: func(r *http.Request) bool {
+				// Fix this so it's more secure.
+				return true
+			},
 		},
 	}
 
 	mux.HandleFunc("/game", gh.AddGame).Methods("POST")
-	mux.HandleFunc("/ws", gh.JoinGame).Methods("GET")
+	mux.HandleFunc("/ws/{id}/{game}", gh.JoinGame).Methods("GET")
 
 	return gh
 }
 
 // NewGameRequest is the request body when adding a new game.
 type NewGameRequest struct {
-	PlayerID string `json:"id"`
 	GameName string `json:"gameName"`
 }
 
-// NewGameResponse is the request body when adding a new game.
+// NewGameResponse is the response body when adding a new game.
 type NewGameResponse struct {
-	PlayerID string `json:"id"`
 	GameName string `json:"gameName"`
 }
 
-// AddGame takes a request and adds it.
+// AddGame tries to create a new game,
+// it also put's you in as a player and sets up a websocket connection.
 func (g *GameHandler) AddGame(w http.ResponseWriter, r *http.Request) {
-	conn, err := g.Upgrade(w, r, nil)
-	if err != nil {
-		http.Error(w, "could not upgrade the request", http.StatusBadRequest)
-		return
-	}
-
 	var req NewGameRequest
 	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -63,24 +60,18 @@ func (g *GameHandler) AddGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hub := hub{
-		players:     make(map[string]*client),
+		players:     make(map[string]*listener),
 		moveC:       make(chan ReadMessage),
-		registerC:   make(chan *client),
-		unregisterC: make(chan *client),
+		registerC:   make(chan *listener),
+		unregisterC: make(chan *listener),
 	}
 
 	g.RLock()
 	defer g.RUnlock()
 	g.hubs[req.GameName] = &hub
 
-	hub.registerC <- &client{
-		conn: conn,
-		id:   req.PlayerID,
-	}
-
 	bs, err := json.Marshal(&NewGameResponse{
 		GameName: req.GameName,
-		PlayerID: req.PlayerID,
 	})
 	if err != nil {
 		http.Error(w, "failed to parse response body", http.StatusBadRequest)
@@ -94,38 +85,31 @@ func (g *GameHandler) AddGame(w http.ResponseWriter, r *http.Request) {
 	w.Write(bs)
 }
 
-// JoinGameRequest is the request body when joining a game.
-type JoinGameRequest struct {
-	PlayerID string `json:"id"`
-	GameName string `json:"gameName"`
-}
-
+// JoinGame upgrades you to a websocket connection,
+// and tries to find the game you asked for and put you in as a player there.
 func (g *GameHandler) JoinGame(w http.ResponseWriter, r *http.Request) {
-
-	conn, err := g.Upgrade(w, r, nil)
-	if err != nil {
-		http.Error(w, "could not upgrade the request", http.StatusBadRequest)
-		return
-	}
-
-	var req JoinGameRequest
-	defer r.Body.Close()
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "could not parse the incoming request", http.StatusBadRequest)
-		return
-	}
+	vars := mux.Vars(r)
+	id := vars["id"]
+	game := vars["game"]
 
 	g.RLock()
 	defer g.RUnlock()
-	hub, ok := g.hubs[req.GameName]
+	hub, ok := g.hubs[game]
 	if !ok {
 		http.Error(w, "no game with that name was found.", http.StatusNotFound)
+		return
 	}
 
-	hub.registerC <- &client{
+	conn, err := g.Upgrade(w, r, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	hub.registerC <- &listener{
 		conn: conn,
 		hub:  hub,
-		id:   req.GameName,
+		id:   id,
 	}
 
 	w.WriteHeader(http.StatusOK)

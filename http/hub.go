@@ -11,31 +11,34 @@ import (
 )
 
 type hub struct {
-	players map[string]*client
+	players map[string]*listener
 	history []rockpaperscissor.Result
 
 	moveC       chan ReadMessage
 	resultsC    chan rockpaperscissor.Result
-	registerC   chan *client
-	unregisterC chan *client
+	registerC   chan *listener
+	unregisterC chan *listener
 }
 
-type client struct {
+type listener struct {
 	id   string
 	hub  *hub
 	conn *websocket.Conn
 	move rockpaperscissor.Move
 }
 
-func (c *client) Move() rockpaperscissor.Move { return c.move }
-func (c *client) Name() string                { return c.id }
-func (c *client) ResetMove()                  { c.move = 0 }
+func (c *listener) Move() rockpaperscissor.Move { return c.move }
+func (c *listener) Name() string                { return c.id }
+func (c *listener) ResetMove()                  { c.move = 0 }
 
 func (h *hub) run() {
+
 	for {
 		select {
 		case c := <-h.registerC:
 			h.players[c.id] = c
+			go c.read()
+			go c.write()
 		case c := <-h.unregisterC:
 			delete(h.players, c.id)
 		case msg := <-h.moveC:
@@ -66,25 +69,32 @@ func (h *hub) isPlayersReady() bool {
 	return true
 }
 
-func (h *hub) getOpponent(id string) (*client, error) {
+func (h *hub) getOpponent(id string) (*listener, error) {
 	for _, p := range h.players {
 		if p.Name() != id {
 			return p, nil
 		}
 	}
-	return nil, errors.New("couldn't find any opponents in the map.")
+	return nil, errors.New("couldn't find any opponents in the map")
 }
 
+// ReadMessage is the message the peers will send us.
 type ReadMessage struct {
 	ID   string                `json:"id"`
 	Move rockpaperscissor.Move `json:"move"`
 }
 
-func (c *client) read() {
+func (c *listener) read() {
 	defer func() {
 		c.hub.unregisterC <- c
 		c.conn.Close()
 	}()
+	c.conn.SetReadLimit(512)
+	c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		return nil
+	})
 
 	for {
 		var req ReadMessage
@@ -98,7 +108,7 @@ func (c *client) read() {
 	}
 }
 
-func (c *client) write() {
+func (c *listener) write() {
 	ticker := time.NewTicker(time.Second * 5)
 	defer func() {
 		ticker.Stop()
@@ -109,7 +119,11 @@ func (c *client) write() {
 		select {
 		case res := <-c.hub.resultsC:
 			fmt.Println(res.Winner.Name())
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
-
 	}
 }
