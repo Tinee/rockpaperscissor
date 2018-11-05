@@ -23,11 +23,13 @@ func Play(p1, p2 Player) {
 	if p1.Move() == p2.Move() {
 		p1.Decide(Draw)
 		p2.Decide(Draw)
+		return
 	}
 
 	if beats(p2) == p1.Move() {
 		p1.Decide(Lost)
 		p2.Decide(Won)
+		return
 	}
 
 	p1.Decide(Won)
